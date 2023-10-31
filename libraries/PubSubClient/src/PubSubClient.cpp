@@ -554,7 +554,7 @@ size_t PubSubClient::write(const uint8_t *buffer, size_t size) {
     return _client->write(buffer,size);
 }
 
-size_t PubSubClient::buildHeader(uint8_t header, uint8_t* buf, uint16_t length) {
+size_t PubSubClient::buildHeader(uint8_t header, uint8_t* buf, uint32_t length) {
     uint8_t lenBuf[4];
     uint8_t llen = 0;
     uint8_t digit;
@@ -578,7 +578,7 @@ size_t PubSubClient::buildHeader(uint8_t header, uint8_t* buf, uint16_t length) 
     return llen+1; // Full header size is variable length bit plus the 1-byte fixed header
 }
 
-boolean PubSubClient::write(uint8_t header, uint8_t* buf, uint16_t length) {
+boolean PubSubClient::write(uint8_t header, uint8_t* buf, uint32_t length) {
     uint16_t rc;
     uint8_t hlen = buildHeader(header, buf, length);
 
@@ -737,7 +737,7 @@ int PubSubClient::state() {
     return this->_state;
 }
 
-boolean PubSubClient::setBufferSize(uint16_t size) {
+boolean PubSubClient::setBufferSize(uint32_t size) {
     if (size == 0) {
         // Cannot set it back to 0
         return false;
@@ -756,7 +756,7 @@ boolean PubSubClient::setBufferSize(uint16_t size) {
     return (this->buffer != NULL);
 }
 
-uint16_t PubSubClient::getBufferSize() {
+uint32_t PubSubClient::getBufferSize() {
     return this->bufferSize;
 }
 PubSubClient& PubSubClient::setKeepAlive(uint16_t keepAlive) {

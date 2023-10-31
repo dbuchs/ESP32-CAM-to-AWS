@@ -89,7 +89,7 @@ class PubSubClient : public Print {
 private:
    Client* _client;
    uint8_t* buffer;
-   uint16_t bufferSize;
+   uint32_t bufferSize;
    uint16_t keepAlive;
    uint16_t socketTimeout;
    uint16_t nextMsgId;
@@ -100,13 +100,13 @@ private:
    uint32_t readPacket(uint8_t*);
    boolean readByte(uint8_t * result);
    boolean readByte(uint8_t * result, uint16_t * index);
-   boolean write(uint8_t header, uint8_t* buf, uint16_t length);
+   boolean write(uint8_t header, uint8_t* buf, uint32_t length);
    uint16_t writeString(const char* string, uint8_t* buf, uint16_t pos);
    // Build up the header ready to send
    // Returns the size of the header
    // Note: the header is built at the end of the first MQTT_MAX_HEADER_SIZE bytes, so will start
    //       (MQTT_MAX_HEADER_SIZE - <returned size>) bytes into the buffer
-   size_t buildHeader(uint8_t header, uint8_t* buf, uint16_t length);
+   size_t buildHeader(uint8_t header, uint8_t* buf, uint32_t length);
    IPAddress ip;
    const char* domain;
    uint16_t port;
@@ -139,8 +139,8 @@ public:
    PubSubClient& setKeepAlive(uint16_t keepAlive);
    PubSubClient& setSocketTimeout(uint16_t timeout);
 
-   boolean setBufferSize(uint16_t size);
-   uint16_t getBufferSize();
+   boolean setBufferSize(uint32_t size);
+   uint32_t getBufferSize();
 
    boolean connect(const char* id);
    boolean connect(const char* id, const char* user, const char* pass);
