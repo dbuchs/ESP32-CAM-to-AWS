@@ -7,8 +7,10 @@
 
 #include "WiFi.h"
 #include "esp_camera.h"
+#include "camera_init.h"
 
 #include "HTTPClient.h"
+#include "time.h"
 
 // The MQTT topics that this device should publish/subscribe
 #define AWS_IOT_PUBLISH_TOPIC "esp32/pub"
@@ -18,6 +20,21 @@ WiFiClientSecure net = WiFiClientSecure();
 PubSubClient client(net);
 
 int i = 0;
+char completeUrl[120];
+
+void messageHandler(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (int i=0;i<length;i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+
+//  StaticJsonDocument<200> doc;
+//  deserializeJson(doc, payload);
+//  const char* message = doc["message"];
+}
 
 void connectWifi() {
   WiFi.mode(WIFI_STA);
@@ -31,16 +48,19 @@ void connectWifi() {
   }
 }
 
-void connectAWS() {
+void initAWS() {
   net.setCACert(AWS_CERT_CA);
   net.setCertificate(AWS_CERT_CRT);
   net.setPrivateKey(AWS_CERT_PRIVATE);
 
   client.setServer(AWS_IOT_ENDPOINT, 8883);
-  Serial.println("Began client");
   client.setKeepAlive(30);
-  Serial.println("Setting Buffer Size to 40032: " + String(client.setBufferSize(40032)));
+  // Create a message handler
+  client.setCallback(messageHandler);
+  connectAWS();
+}
 
+void connectAWS() {
   Serial.println("Connecting to AWS IOT");
 
   while (!client.connect(THINGNAME)) {
@@ -52,12 +72,11 @@ void connectAWS() {
     Serial.println("AWS IoT Timeout!");
     return;
   }
-
   // Subscribe to a topic
-  //  client.subscribe(AWS_IOT_SUBSCRIBE_TOPIC);
+  client.subscribe(AWS_IOT_SUBSCRIBE_TOPIC);
 
   Serial.println("AWS IoT Connected!");
-  //Serial.println(client.state());
+  Serial.println(client.state());
 }
 
 void setupCamera() {
@@ -112,81 +131,44 @@ void publishMessage() {
     return;
   }
 
-  char *input = (char *)fb->buf;
+  // Create an HTTPClient object
+  HTTPClient http;
 
-  //AWS Lambda Actions need base64 encoded data, jsonified
-  char output[base64_enc_len(3)];
-  String image;
-  for (int i = 0; i < fb->len; i++) {
-    base64_encode(output, (input++), 3);
-    if (i % 3 == 0) image += String(output);
+  // Get current time for filename
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Failed to obtain time");
+    return;
   }
+
+  // Use snprintf to format the time directly into formattedTime
+  snprintf(completeUrl, sizeof(completeUrl), "%s%04d%02d%02d%02d%02d%02d.jpg", serverUrl, 1900 + timeinfo.tm_year, timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+  Serial.println(completeUrl);
+
+  // Specify the server and endpoint
+  
+  http.begin(completeUrl);
+
+  // Set the HTTP method to PUT
+  http.addHeader("Content-Type", "image/jpeg");
+  int httpResponseCode = http.sendRequest("PUT", (uint8_t *)fb->buf, fb->len);
+
+  // Check for a successful response
+  if (httpResponseCode == 200) {
+    Serial.println("Image uploaded successfully!");
+  } else {
+    Serial.print("HTTP error code: ");
+    Serial.println(httpResponseCode);
+  }
+
+  // End the HTTP connection
+  http.end();
+
   esp_camera_fb_return(fb);
+}
 
-  char timestamp[12];
-  itoa(millis(), timestamp, 10);
-  char jsonStart[30] = "{\"file\":\"";
-  strcat(jsonStart, timestamp);
-  strcat(jsonStart, "\",\"image\":\"");
-  Serial.println(jsonStart);
-  char jsonEnd[] = "\"}";
-  Serial.println(jsonEnd);
+void setupTime() {
 
-  if (!client.connected()) {
-    Serial.println("Connecting to AWS IOT");
-
-    while (!client.connect(THINGNAME)) {
-      Serial.print(".");
-      delay(100);
-    }
-
-    if (!client.connected()) {
-      Serial.println("AWS IoT Timeout!");
-      return;
-    }
-  }
-
-
-
-  uint32_t fbLen = image.length();
-  String str = "";
-  String imageFile = "";
-  String chunk = "";
-  for (uint32_t n = 0; n < fbLen; n = n + 40000) {
-
-    if (n + 40000 < fbLen) {
-      str = image.substring(n, n + 40000);
-    } else if (fbLen % 40000 > 0) {
-      uint32_t remain = fbLen % 40000;
-      str = image.substring(n, n + remain);
-    }
-    imageFile = String(jsonStart) + str + String(jsonEnd);
-    //Serial.println(String(imageFile.length()));
-    //Serial.println(imageFile.substring(0,40));
-    //Serial.println(imageFile.substring(imageFile.length()-40,imageFile.length()));
-    //Serial.println(client.publish(AWS_IOT_PUBLISH_TOPIC, (uint8_t*)imageFile.c_str(),imageFile.length(), false));
-    size_t chunkLen = imageFile.length();
-    boolean res = client.beginPublish(AWS_IOT_PUBLISH_TOPIC, chunkLen, false);
-    Serial.println("publish began " + String(res));
-
-    for (size_t z = 0; z < chunkLen; z = z + 2048) {
-      if (z + 2048 < chunkLen) {
-        chunk = imageFile.substring(z, z + 2048);
-        client.write((uint8_t *)chunk.c_str(), 2048);
-      } else if (chunkLen % 2048 > 0) {
-        size_t remainder = chunkLen % 2048;
-        chunk = imageFile.substring(z, z + remainder);
-        client.write((uint8_t *)chunk.c_str(), remainder);
-      }
-      Serial.println(String(z));
-    }
-
-    Serial.println("publish written " + String(res));
-
-    res = client.endPublish();
-    Serial.println("publish ended " + String(res));
-    Serial.println(String(n));
-  }
 }
 
 
@@ -195,8 +177,8 @@ void setup() {
   Serial.begin(9600);
   setupCamera();
   connectWifi();
-  connectAWS();
-  Serial.println("out of connection phase");
+  initAWS();
+  configTime(GMTOffset_sec*(-6), DayLightOffset_sec, NTPServer);
 }
 
 void loop() {
@@ -204,5 +186,10 @@ void loop() {
   Serial.println("looping now");
   publishMessage();
   delay(30000);
-  client.loop();
+  if(!client.connected())
+  {
+    connectAWS();
+  } else {
+    client.loop();
+  }
 }
