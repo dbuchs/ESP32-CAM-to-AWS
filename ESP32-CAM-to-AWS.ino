@@ -10,7 +10,10 @@
 #include "camera_init.h"
 
 #include "HTTPClient.h"
-#include "time.h"
+#include <NTPClient.h>
+
+//Library for saving to SD card
+#include "SD_MMC.h"
 
 // The MQTT topics that this device should publish/subscribe
 #define AWS_IOT_PUBLISH_TOPIC "esp32/pub"
@@ -19,25 +22,34 @@
 WiFiClientSecure net = WiFiClientSecure();
 PubSubClient client(net);
 
-int i = 0;
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP);
+
+int count = 0;
 char completeUrl[120];
 
-void messageHandler(char* topic, byte* payload, unsigned int length) {
+void messageHandler(char *topic, byte *payload, unsigned int length) {
   Serial.print("Message arrived [");
   Serial.print(topic);
   Serial.print("] ");
-  for (int i=0;i<length;i++) {
+  for (int i = 0; i < length; i++) {
     Serial.print((char)payload[i]);
   }
   Serial.println();
 
-//  StaticJsonDocument<200> doc;
-//  deserializeJson(doc, payload);
-//  const char* message = doc["message"];
+  for (count = 0; count < 10; count++) {
+    takeAndSave();  
+  }
+  count = 0;
+
+  //  StaticJsonDocument<200> doc;
+  //  deserializeJson(doc, payload);
+  //  const char* message = doc["message"];
 }
 
 void connectWifi() {
   WiFi.mode(WIFI_STA);
+
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   Serial.println("Connecting to Wi-Fi");
@@ -46,6 +58,9 @@ void connectWifi() {
     delay(500);
     Serial.print(".");
   }
+  Serial.println("Wifi connected, configuring time");
+  // Synchronize the RTC with the NTP server
+  timeClient.begin();
 }
 
 void initAWS() {
@@ -54,7 +69,7 @@ void initAWS() {
   net.setPrivateKey(AWS_CERT_PRIVATE);
 
   client.setServer(AWS_IOT_ENDPOINT, 8883);
-  client.setKeepAlive(30);
+  client.setKeepAlive(40);
   // Create a message handler
   client.setCallback(messageHandler);
   connectAWS();
@@ -121,37 +136,79 @@ void setupCamera() {
     Serial.printf("Camera init failed with error 0x%x", err);
     return;
   }
+  //Serial.println("Starting SD Card");
+  if(!SD_MMC.begin()){
+    Serial.println("SD Card Mount Failed");
+    return;
+  }
+  
+  uint8_t cardType = SD_MMC.cardType();
+  if(cardType == CARD_NONE){
+    Serial.println("No SD Card attached");
+    return;
+  }
+
 }
 
-void publishMessage() {
+void takeAndSave() {
   camera_fb_t *fb = NULL;
   fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("Camera capture failed");
     return;
   }
+  // Get current time for filename
+  time_t rawTime = timeClient.getEpochTime();
+
+  // Create a tmElements_t struct to extract time components
+  char filename[18];
+  // Format the time as YYYYMMDDHHMMSS
+  snprintf(filename, sizeof(filename), "/%10d%02d.jpg", rawTime, count);
+
+  Serial.println(filename);
+
+  File file = SD_MMC.open(filename, FILE_WRITE);
+  if (!file) {
+    Serial.println("Failed to open file for writing");
+  } else {
+    file.write(fb->buf, fb->len);
+    Serial.printf("Saved file to: %s\n", filename);
+  }
+  file.close();
+  esp_camera_fb_return(fb);
+}
+
+void takeAndUpload() {
+  camera_fb_t *fb = NULL;
+  fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Camera capture failed");
+    return;
+  }
+  // Get current time for filename
+  time_t rawTime = timeClient.getEpochTime();
+
+  // Create a tmElements_t struct to extract time components
+  char filename[18];
+  // Format the time as YYYYMMDDHHMMSS
+  snprintf(filename, sizeof(filename), "/%10d%02d.jpg", rawTime, count);
+
+  Serial.println(filename);
 
   // Create an HTTPClient object
   HTTPClient http;
 
-  // Get current time for filename
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    Serial.println("Failed to obtain time");
-    return;
-  }
-
   // Use snprintf to format the time directly into formattedTime
-  snprintf(completeUrl, sizeof(completeUrl), "%s%04d%02d%02d%02d%02d%02d.jpg", serverUrl, 1900 + timeinfo.tm_year, timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+  snprintf(completeUrl, sizeof(completeUrl), "%s%s", serverUrl, filename);
   Serial.println(completeUrl);
 
   // Specify the server and endpoint
-  
   http.begin(completeUrl);
 
   // Set the HTTP method to PUT
   http.addHeader("Content-Type", "image/jpeg");
   int httpResponseCode = http.sendRequest("PUT", (uint8_t *)fb->buf, fb->len);
+  http.end();
 
   // Check for a successful response
   if (httpResponseCode == 200) {
@@ -159,18 +216,31 @@ void publishMessage() {
   } else {
     Serial.print("HTTP error code: ");
     Serial.println(httpResponseCode);
+    File file = SD_MMC.open(filename, FILE_WRITE);
+    if (!file) {
+      Serial.println("Failed to open file for writing");
+    } else {
+      file.write(fb->buf, fb->len);
+      Serial.printf("Saved file to: %s\n", filename);
+    }
+    file.close();
   }
 
   // End the HTTP connection
-  http.end();
 
   esp_camera_fb_return(fb);
 }
 
-void setupTime() {
+void listFiles() {
+  File root = SD_MMC.open("/");
+  File file = root.openNextFile();
 
+  while (file) {
+    Serial.print("File: ");
+    Serial.println(file.name());
+    file = root.openNextFile();
+  }
 }
-
 
 void setup() {
   // put your setup code here, to run once:
@@ -178,16 +248,18 @@ void setup() {
   setupCamera();
   connectWifi();
   initAWS();
-  configTime(GMTOffset_sec*(-6), DayLightOffset_sec, NTPServer);
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
   Serial.println("looping now");
-  publishMessage();
+  timeClient.update();
+  client.loop();
+  takeAndUpload();
+  listFiles();
   delay(30000);
-  if(!client.connected())
-  {
+
+  if (!client.connected()) {
     connectAWS();
   } else {
     client.loop();
