@@ -4,6 +4,7 @@
 // API for sending MQTT message to AWS IoT Core
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
+#include <ArduinoJson.h>
 
 #include "WiFi.h"
 #include "esp_camera.h"
@@ -28,23 +29,70 @@ NTPClient timeClient(ntpUDP);
 int count = 0;
 char completeUrl[120];
 
+unsigned long previousMillis = 0;
+const unsigned long interval = 30000;  // 30 seconds in milliseconds
+
+char mostRecent[30]; // To store the filename of the most recent file
+
+void sendMessage(char *message) {
+  StaticJsonDocument<200> doc;
+  doc["message"] = message;
+  
+  char payload[200];
+  serializeJson(doc,payload,sizeof(payload));
+  client.publish(AWS_IOT_PUBLISH_TOPIC, payload);
+}
+
 void messageHandler(char *topic, byte *payload, unsigned int length) {
   Serial.print("Message arrived [");
   Serial.print(topic);
   Serial.print("] ");
+
+
   for (int i = 0; i < length; i++) {
     Serial.print((char)payload[i]);
   }
   Serial.println();
 
-  for (count = 0; count < 10; count++) {
-    takeAndSave();  
-  }
-  count = 0;
 
-  //  StaticJsonDocument<200> doc;
-  //  deserializeJson(doc, payload);
-  //  const char* message = doc["message"];
+
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, payload, length);
+
+  if (error) {
+    Serial.print("Failed to parse JSON: ");
+    Serial.println(error.c_str());
+    return;  // If parsing fails, exit the function
+  }
+  // Check if the JSON document contains a "message" field
+  if (doc.containsKey("message")) {
+    String message = doc["message"].as<String>();
+
+    // Use a switch-case structure or if-else statements to handle different messages
+    if (message == "delete") {
+      if(deleteAllFiles()) {
+        sendMessage("Successful deletion.");
+      } else {
+        sendMessage("Failed deletion.");
+      }
+
+    } else if (message == "capture") {
+      char results[11] = "1111111111";
+      for (count = 0; count < 10; count++) {
+        if(!takeAndSave()) {
+          results[count] = '0';
+        }
+      }
+      char response[50];
+      sprintf(response, "Capture and save results: %s", results);
+      sendMessage(response);
+      count = 0;
+    }
+
+  }
+  else {
+    Serial.println("No 'message' field found in JSON.");
+  }
 }
 
 void connectWifi() {
@@ -136,26 +184,28 @@ void setupCamera() {
     Serial.printf("Camera init failed with error 0x%x", err);
     return;
   }
+}
+
+void initSD() {
   //Serial.println("Starting SD Card");
-  if(!SD_MMC.begin()){
+  if (!SD_MMC.begin()) {
     Serial.println("SD Card Mount Failed");
     return;
   }
-  
+
   uint8_t cardType = SD_MMC.cardType();
-  if(cardType == CARD_NONE){
+  if (cardType == CARD_NONE) {
     Serial.println("No SD Card attached");
     return;
   }
-
 }
 
-void takeAndSave() {
+bool takeAndSave() {
   camera_fb_t *fb = NULL;
   fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("Camera capture failed");
-    return;
+    return false;
   }
   // Get current time for filename
   time_t rawTime = timeClient.getEpochTime();
@@ -166,16 +216,18 @@ void takeAndSave() {
   snprintf(filename, sizeof(filename), "/%10d%02d.jpg", rawTime, count);
 
   Serial.println(filename);
-
+  bool result = true;
   File file = SD_MMC.open(filename, FILE_WRITE);
   if (!file) {
     Serial.println("Failed to open file for writing");
+    result = false;
   } else {
     file.write(fb->buf, fb->len);
     Serial.printf("Saved file to: %s\n", filename);
   }
   file.close();
   esp_camera_fb_return(fb);
+  return result;
 }
 
 void takeAndUpload() {
@@ -242,12 +294,73 @@ void listFiles() {
   }
 }
 
+void getMostRecentFile() {
+  File root = SD_MMC.open("/");
+  if (!root) {
+    Serial.println("Failed to open root directory");
+    return;
+  }
+  time_t latestTimestamp = 0;
+  File entry;
+  while ((entry = root.openNextFile())) {
+    if (entry.isDirectory()) {
+      continue;
+    }
+
+    if (entry.getLastWrite()) {
+      time_t fileTimestamp = entry.getLastWrite();
+      if (fileTimestamp > latestTimestamp) {
+        latestTimestamp = fileTimestamp;
+        snprintf(mostRecent, sizeof(mostRecent), "%s", entry.name());
+      }
+    }
+
+    entry.close();
+  }
+
+  if (latestTimestamp == 0) {
+    Serial.println("No files found on the SD card");
+    return;
+  }
+
+  Serial.print("Most recent file: ");
+  Serial.println(mostRecent);
+  root.close();
+}
+
+bool deleteAllFiles() {
+  // Open the root directory
+  File root = SD_MMC.open("/");
+
+  // Check if the root directory opened successfully
+  if (!root) {
+    return false;
+  }
+
+  // Traverse all files and subdirectories
+  while (File entry = root.openNextFile()) {
+    // Delete the file
+    if (entry.isDirectory()) {
+      entry.close();  // Close subdirectories
+    } else {
+      entry.close();            // Close the file
+      SD_MMC.remove(entry.name());  // Remove the file
+    }
+  }
+
+  // Close the root directory
+  root.close();
+
+  return true;
+}
+
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(9600);
   setupCamera();
   connectWifi();
   initAWS();
+  initSD();
 }
 
 void loop() {
@@ -255,13 +368,21 @@ void loop() {
   Serial.println("looping now");
   timeClient.update();
   client.loop();
-  takeAndUpload();
   listFiles();
-  delay(30000);
+  unsigned long currentMillis = millis();
+
+  // Check if it's time to run the takeAndUpload() function
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;  // Reset the timer
+
+    // Call your function to take and upload photos
+    takeAndUpload();
+  }
 
   if (!client.connected()) {
     connectAWS();
   } else {
     client.loop();
   }
+  delay(1000);
 }
